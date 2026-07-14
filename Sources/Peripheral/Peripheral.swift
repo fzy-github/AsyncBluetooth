@@ -99,6 +99,11 @@ public final class Peripheral: Sendable {
     
     /// Cancels all pending operations, and stops awaiting for any responses.
     public func cancelAllOperations() async {
+        #if os(iOS) && compiler(>=6.4)
+        // Terminate any active channel sounding session first, so its event stream is finished
+        // (and the session cancelled) before its executor is flushed.
+        await self.context.channelSoundingSessionContext.continuation?.finish()
+        #endif
         await self.context.flush(error: BluetoothError.operationCancelled)
     }
     
@@ -162,6 +167,101 @@ public final class Peripheral: Sendable {
         }
     }
     
+    #if os(iOS) && compiler(>=6.4)
+
+    // MARK: Channel Sounding
+
+    /// Starts a channel sounding session with the peripheral, during which channel sounding
+    /// procedures are repeatedly performed to measure the distance to the peripheral.
+    /// - Returns: An `AsyncThrowingStream` that yields the results of each channel sounding
+    ///   procedure. The stream finishes when the session ends: normally after calling
+    ///   `cancelChannelSoundingSession`, or by throwing when the session ends with an error.
+    /// - Note: Terminating the stream (e.g. breaking out of the loop, or cancelling the task
+    ///   that's iterating it) also cancels the channel sounding session.
+    /// - Note: Requires a device that supports channel sounding (see
+    ///   `CentralManager.supportsChannelSounding`), and a connected peripheral that was paired
+    ///   via AccessorySetupKit.
+    @available(iOS 27.0, *)
+    public func startChannelSoundingSession(
+        _ configuration: CBChannelSoundingSessionConfiguration = CBChannelSoundingSessionConfiguration(role: .initiator)
+    ) async throws -> AsyncThrowingStream<ChannelSoundingEventData, Error> {
+        try await withCheckedThrowingContinuation { continuation in
+            Task {
+                // Note that the enqueue call will remain awaiting until the session is terminated. This
+                // means that we can end up in a state were the continuation is used to send the stream,
+                // and yet we want to throw an error (e.g. calling `cancelAllOperations` during a
+                // session). To avoid crashing, we check whether the continuation has been used before.
+                var isContinuationUsed = false
+
+                do {
+                    try await self.context.channelSoundingSessionExecutor.enqueue {
+                        guard !isContinuationUsed else { return }
+                        isContinuationUsed = true
+
+                        let eventStream = self.createChannelSoundingEventStream(configuration: configuration)
+                        continuation.resume(returning: eventStream)
+                    }
+                } catch {
+                    guard !isContinuationUsed else { return }
+                    isContinuationUsed = true
+
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Asks the peripheral to end an active channel sounding session.
+    /// - Note: The session's event stream will be finished, and the
+    ///   `peripheral(_:didCompleteChannelSoundingSession:)` message will confirm the session
+    ///   has ended.
+    @available(iOS 27.0, *)
+    public func cancelChannelSoundingSession() async {
+        guard let continuation = await self.context.channelSoundingSessionContext.continuation else {
+            Self.logger.warning("Unable to cancel channel sounding session because there's no active session!")
+            return
+        }
+
+        Self.logger.info("Cancelling channel sounding session...")
+
+        continuation.finish()
+    }
+
+    /// Creates the async stream where channel sounding procedure results will get added while the
+    /// channel sounding session is active.
+    /// - Note: The stream is responsible for starting the session.
+    @available(iOS 27.0, *)
+    private func createChannelSoundingEventStream(
+        configuration: CBChannelSoundingSessionConfiguration
+    ) -> AsyncThrowingStream<ChannelSoundingEventData, Error> {
+        AsyncThrowingStream(ChannelSoundingEventData.self) { continuation in
+            continuation.onTermination = { @Sendable _ in
+                self.cbPeripheral.cancelChannelSoundingSession()
+                Self.logger.info("Channel sounding session terminated")
+
+                Task {
+                    await self.context.channelSoundingSessionContext.setContinuation(nil)
+
+                    do {
+                        try await self.context.channelSoundingSessionExecutor.setWorkCompletedWithResult(.success(()))
+                    } catch {
+                        Self.logger.warning("Channel sounding session ended without a continuation!")
+                    }
+                }
+            }
+
+            Task {
+                await self.context.channelSoundingSessionContext.setContinuation(continuation)
+
+                self.cbPeripheral.startChannelSoundingSession(configuration)
+
+                Self.logger.info("Starting channel sounding session...")
+            }
+        }
+    }
+
+    #endif
+
     // MARK: Descriptors
     
     /// Discovers the descriptors of a characteristic.

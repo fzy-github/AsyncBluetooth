@@ -6,6 +6,20 @@ import Combine
 
 /// Contains the objects necessary to track a Peripheral's commands.
 actor PeripheralContext {
+    #if os(iOS) && compiler(>=6.4)
+    actor ChannelSoundingSessionContext {
+        /// Continuation used for yielding channel sounding procedure results, and finishing
+        /// channel sounding sessions.
+        private(set) var continuation: AsyncThrowingStream<ChannelSoundingEventData, Error>.Continuation?
+
+        func setContinuation(
+            _ continuation: AsyncThrowingStream<ChannelSoundingEventData, Error>.Continuation?
+        ) -> Void {
+            self.continuation = continuation
+        }
+    }
+    #endif
+
     nonisolated let characteristicValueUpdatedSubject = PassthroughSubject<CharacteristicValueUpdateEventData, Never>()
     nonisolated let invalidatedServicesSubject = PassthroughSubject<[Service], Never>()
     
@@ -77,6 +91,16 @@ actor PeripheralContext {
         return executor
     }()
     
+    #if os(iOS) && compiler(>=6.4)
+    private(set) lazy var channelSoundingSessionContext = ChannelSoundingSessionContext()
+
+    private(set) lazy var channelSoundingSessionExecutor = {
+        let executor = AsyncSerialExecutor<Void>()
+        flushableExecutors.append(executor)
+        return executor
+    }()
+    #endif
+
     private var flushableExecutors: ThreadSafeArray<FlushableExecutor> = []
     
     func flush(error: Error) async {

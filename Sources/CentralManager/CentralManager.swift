@@ -194,6 +194,15 @@ public final class CentralManager: Sendable {
     public static func supports(_ features: CBCentralManager.Feature) -> Bool {
         CBCentralManager.supports(features)
     }
+
+    #if os(iOS) && compiler(>=6.4)
+    /// Returns a Boolean that indicates whether the device supports channel sounding.
+    /// - Note: Should only be checked after the central manager's state is `poweredOn`.
+    @available(iOS 27.0, *)
+    public static var supportsChannelSounding: Bool {
+        CBCentralManager.supports(.channelSounding)
+    }
+    #endif
     
     /// Creates the async stream where scan data will get added as part of scanning for peripherals.
     /// - Note: The stream is responsible for starting scan.

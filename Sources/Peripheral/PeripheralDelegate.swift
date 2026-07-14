@@ -169,4 +169,41 @@ extension PeripheralDelegate: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
         self.context.invalidatedServicesSubject.send(invalidatedServices.map { Service($0) })
     }
+
+    #if os(iOS) && compiler(>=6.4)
+    @available(iOS 27.0, *)
+    func peripheral(
+        _ cbPeripheral: CBPeripheral,
+        didReceive result: CBChannelSoundingProcedureResults?,
+        error: Error?
+    ) {
+        // A negative distance is a sentinel for procedures that completed without a valid
+        // measurement. We normalize it to nil.
+        let distance: Double? = {
+            guard let result, result.distance >= 0 else { return nil }
+            return result.distance
+        }()
+        let eventData = ChannelSoundingEventData(distance: distance, error: error)
+
+        Task {
+            guard let continuation = await self.context.channelSoundingSessionContext.continuation else {
+                Self.logger.warning("Received ChannelSoundingProcedureResults without an active session")
+                return
+            }
+            continuation.yield(eventData)
+        }
+    }
+
+    @available(iOS 27.0, *)
+    func peripheral(_ cbPeripheral: CBPeripheral, didCompleteChannelSoundingSession error: Error?) {
+        Task {
+            guard let continuation = await self.context.channelSoundingSessionContext.continuation else {
+                // The session's event stream was already terminated by the client - e.g. via
+                // `cancelChannelSoundingSession` - which is what completed this session.
+                return
+            }
+            continuation.finish(throwing: error)
+        }
+    }
+    #endif
 }
